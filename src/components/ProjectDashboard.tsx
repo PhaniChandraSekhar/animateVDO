@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
 import { Project, StoryProgress } from '../types';
-import { BookOpen, Wand2, Palette, Mic, Video, Loader2, Brain } from 'lucide-react'; // Added Brain for AI
+import { BookOpen, Wand2, Palette, Mic, Video, Loader2, Brain, Users } from 'lucide-react'; // Added Users
 
 interface ResearchData {
   summary: string;
@@ -23,6 +23,16 @@ interface ScriptData {
   scenes: ScriptSceneData[];
 }
 
+interface CharacterUIDetail { // Matches CharacterDetail from Edge Function
+  name: string;
+  description: string;
+  image_url: string;
+  prompt_used: {
+    description: string;
+    style_prompt: string;
+  };
+}
+
 
 export default function ProjectDashboard() {
   const { id } = useParams();
@@ -38,6 +48,10 @@ export default function ProjectDashboard() {
   const [isScripting, setIsScripting] = useState(false);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [scriptData, setScriptData] = useState<ScriptData | null>(null);
+
+  const [isGeneratingCharacters, setIsGeneratingCharacters] = useState(false);
+  const [characterGenError, setCharacterGenError] = useState<string | null>(null);
+  const [characterUIData, setCharacterUIData] = useState<CharacterUIDetail[] | null>(null);
 
 
   useEffect(() => {
@@ -58,6 +72,9 @@ export default function ProjectDashboard() {
           }
           if (projectData.script_data) {
             setScriptData(projectData.script_data as ScriptData);
+          }
+          if (projectData.character_data) {
+            setCharacterUIData(projectData.character_data as CharacterUIDetail[]);
           }
         }
 
@@ -138,7 +155,7 @@ export default function ProjectDashboard() {
   const steps = [
     { name: 'Research', icon: BookOpen, completed: progress.research, data: researchData },
     { name: 'Script', icon: Wand2, completed: progress.script, data: scriptData },
-    { name: 'Characters', icon: Palette, completed: progress.characters, data: null },
+    { name: 'Characters', icon: Palette, completed: progress.characters, data: characterUIData },
     { name: 'Audio', icon: Mic, completed: progress.audio, data: null },
     { name: 'Video', icon: Video, completed: progress.video, data: null },
   ];
@@ -176,6 +193,43 @@ export default function ProjectDashboard() {
       setScriptError('Failed to generate script: ' + displayError);
     } finally {
       setIsScripting(false);
+    }
+  };
+
+  const handleGenerateCharacters = async () => {
+    if (!project || !progress || !progress.script) return;
+
+    setIsGeneratingCharacters(true);
+    setCharacterGenError(null);
+
+    try {
+      const payload = {
+        project_id: project.id,
+        script_data: scriptData || project.script_data, // Pass existing script data
+        // custom_prompts_per_character can be added here if UI exists for it
+      };
+      const { data, error: functionError } = await supabase.functions.invoke('ai-character-generation', {
+        body: payload,
+      });
+
+      if (functionError) {
+        throw new Error(functionError.message || 'Unknown error invoking character generation function');
+      }
+      if (data.error) { // If the function itself returns an error in its JSON response
+        throw new Error(data.error);
+      }
+      
+      setCharacterUIData(data as CharacterUIDetail[]);
+      setProject(prev => prev ? { ...prev, character_data: data } : null);
+      setProgress(prev => prev ? { ...prev, characters: true } : null);
+      setCharacterGenError(null);
+
+    } catch (err: any) {
+      console.error("Error calling ai-character-generation function:", err);
+      const displayError = err.message || 'An unexpected error occurred. Please try again.';
+      setCharacterGenError('Failed to generate characters: ' + displayError);
+    } finally {
+      setIsGeneratingCharacters(false);
     }
   };
 
@@ -325,6 +379,48 @@ export default function ProjectDashboard() {
                                     </details>
                                   ))}
                                 </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {step.name === 'Characters' && (
+                        <div className="ml-16 mt-4 mb-4 pb-4 pl-1 border-l border-gray-200 min-h-[60px]">
+                          {!characterUIData && progress.script && !progress.characters && !isGeneratingCharacters && (
+                            <button
+                              onClick={handleGenerateCharacters}
+                              disabled={isGeneratingCharacters || !progress.script}
+                              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50"
+                            >
+                              <Users className="mr-2 h-5 w-5" />
+                              Generate Characters
+                            </button>
+                          )}
+                          {isGeneratingCharacters && (
+                            <div className="flex items-center text-sm text-green-600">
+                              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                              Generating characters, please wait...
+                            </div>
+                          )}
+                          {characterGenError && !isGeneratingCharacters && (
+                            <p className="text-sm text-red-600 mt-2">{characterGenError}</p>
+                          )}
+                          {characterUIData && !isGeneratingCharacters && (
+                            <div className="mt-2 space-y-4">
+                              <h4 className="font-medium text-gray-800">Generated Characters:</h4>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                                {characterUIData.map((char, i) => (
+                                  <div key={i} className="border rounded-lg p-3 shadow">
+                                    <img src={char.image_url} alt={`Generated image of ${char.name}`} className="w-full h-48 object-cover rounded-md mb-2" />
+                                    <h5 className="font-semibold text-gray-700">{char.name}</h5>
+                                    <p className="text-xs text-gray-500 italic truncate" title={char.description}>
+                                      Desc: {char.description}
+                                    </p>
+                                    <p className="text-xs text-gray-500 italic truncate" title={char.prompt_used.style_prompt}>
+                                      Style: {char.prompt_used.style_prompt}
+                                    </p>
+                                  </div>
+                                ))}
                               </div>
                             </div>
                           )}
