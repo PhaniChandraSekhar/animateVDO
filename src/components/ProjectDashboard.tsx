@@ -10,6 +10,20 @@ interface ResearchData {
   sources: string[];
 }
 
+interface ScriptSceneData {
+  scene_number: number;
+  setting: string;
+  action: string;
+  dialogue: Array<{ character: string; line: string }>;
+}
+
+interface ScriptData {
+  title: string;
+  logline: string;
+  scenes: ScriptSceneData[];
+}
+
+
 export default function ProjectDashboard() {
   const { id } = useParams();
   const [project, setProject] = useState<Project | null>(null);
@@ -20,6 +34,10 @@ export default function ProjectDashboard() {
   const [isResearching, setIsResearching] = useState(false);
   const [researchError, setResearchError] = useState<string | null>(null);
   const [researchData, setResearchData] = useState<ResearchData | null>(null);
+
+  const [isScripting, setIsScripting] = useState(false);
+  const [scriptError, setScriptError] = useState<string | null>(null);
+  const [scriptData, setScriptData] = useState<ScriptData | null>(null);
 
 
   useEffect(() => {
@@ -34,8 +52,13 @@ export default function ProjectDashboard() {
 
         if (projectError) throw projectError;
         setProject(projectData);
-        if (projectData && projectData.research_data) {
-          setResearchData(projectData.research_data as ResearchData);
+        if (projectData) {
+          if (projectData.research_data) {
+            setResearchData(projectData.research_data as ResearchData);
+          }
+          if (projectData.script_data) {
+            setScriptData(projectData.script_data as ScriptData);
+          }
         }
 
         // Fetch progress details
@@ -114,11 +137,48 @@ export default function ProjectDashboard() {
 
   const steps = [
     { name: 'Research', icon: BookOpen, completed: progress.research, data: researchData },
-    { name: 'Script', icon: Wand2, completed: progress.script, data: null }, // Assuming no specific data for these steps yet
+    { name: 'Script', icon: Wand2, completed: progress.script, data: scriptData },
     { name: 'Characters', icon: Palette, completed: progress.characters, data: null },
     { name: 'Audio', icon: Mic, completed: progress.audio, data: null },
     { name: 'Video', icon: Video, completed: progress.video, data: null },
   ];
+
+  const handleStartScripting = async () => {
+    if (!project || !progress || !progress.research) return;
+
+    setIsScripting(true);
+    setScriptError(null);
+
+    try {
+      const payload = {
+        project_id: project.id,
+        research_data: researchData || project.research_data, // Pass existing research data
+      };
+      const { data, error: functionError } = await supabase.functions.invoke('ai-scriptwriting', {
+        body: payload,
+      });
+
+      if (functionError) {
+        throw new Error(functionError.message || 'Unknown error invoking scriptwriting function');
+      }
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      setScriptData(data);
+      setProject(prev => prev ? { ...prev, script_data: data } : null);
+      setProgress(prev => prev ? { ...prev, script: true } : null);
+      setScriptError(null);
+
+    } catch (err: any) {
+      console.error("Error calling ai-scriptwriting function:", err);
+      const displayError = err.message || 'An unexpected error occurred. Please try again.';
+      setScriptError('Failed to generate script: ' + displayError);
+    } finally {
+      setIsScripting(false);
+    }
+  };
+
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
@@ -164,11 +224,11 @@ export default function ProjectDashboard() {
                     {step.name === 'Research' && (
                       <div className="ml-16 mt-4 mb-4 pb-4 pl-1 border-l border-gray-200">
                         {/* Button and Loading/Error display section for Research step */}
-                        <div className="ml-16 mt-4 mb-4 pb-4 pl-1 border-l border-gray-200 min-h-[60px]"> {/* Added min-h for layout consistency */}
+                        <div className="ml-16 mt-4 mb-4 pb-4 pl-1 border-l border-gray-200 min-h-[60px]"> 
                           {!researchData && !progress.research && !isResearching && (
                             <button
                               onClick={handleStartResearch}
-                              disabled={isResearching} // This is somewhat redundant due to the !isResearching in the parent conditional
+                              disabled={isResearching} 
                               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
                             >
                               <Brain className="mr-2 h-5 w-5" />
@@ -181,10 +241,10 @@ export default function ProjectDashboard() {
                                Researching topic, please wait... This may take a moment.
                              </div>
                           )}
-                          {researchError && !isResearching && ( // Only show error if not currently researching
+                          {researchError && !isResearching && ( 
                             <p className="text-sm text-red-600 mt-2">{researchError}</p>
                           )}
-                          {researchData && !isResearching && ( // Only show data if not currently researching (and no error)
+                          {researchData && !isResearching && ( 
                             <div className="mt-2 space-y-3 text-sm">
                               <div>
                                 <h4 className="font-medium text-gray-800">Research Summary:</h4>
@@ -206,6 +266,66 @@ export default function ProjectDashboard() {
                                   </ul>
                                 </div>
                               )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      {step.name === 'Script' && (
+                        <div className="ml-16 mt-4 mb-4 pb-4 pl-1 border-l border-gray-200 min-h-[60px]">
+                          {!scriptData && progress.research && !progress.script && !isScripting && (
+                            <button
+                              onClick={handleStartScripting}
+                              disabled={isScripting || !progress.research}
+                              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
+                            >
+                              <Wand2 className="mr-2 h-5 w-5" />
+                              Start Script Generation
+                            </button>
+                          )}
+                          {isScripting && (
+                            <div className="flex items-center text-sm text-purple-600">
+                              <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                              Generating script, please wait... This may take a few moments.
+                            </div>
+                          )}
+                          {scriptError && !isScripting && (
+                            <p className="text-sm text-red-600 mt-2">{scriptError}</p>
+                          )}
+                          {scriptData && !isScripting && (
+                            <div className="mt-2 space-y-3 text-sm">
+                              <div>
+                                <h4 className="font-medium text-gray-800">Script Title:</h4>
+                                <p className="text-gray-700 font-semibold">{scriptData.title}</p>
+                              </div>
+                              <div>
+                                <h4 className="font-medium text-gray-800">Logline:</h4>
+                                <p className="text-gray-600 italic">{scriptData.logline}</p>
+                              </div>
+                              <div>
+                                <h4 className="font-medium text-gray-800">Scenes:</h4>
+                                <div className="space-y-2">
+                                  {scriptData.scenes.map((scene, i) => (
+                                    <details key={i} className="bg-gray-50 p-2 rounded">
+                                      <summary className="font-medium text-gray-700 cursor-pointer">
+                                        Scene {scene.scene_number}: {scene.setting}
+                                      </summary>
+                                      <div className="mt-1 pl-4">
+                                        <p className="text-gray-600"><span className="font-semibold">Action:</span> {scene.action}</p>
+                                        {scene.dialogue && scene.dialogue.length > 0 && (
+                                          <div className="mt-1">
+                                            <p className="font-semibold text-gray-600">Dialogue:</p>
+                                            <ul className="list-disc list-inside pl-2 text-gray-500">
+                                              {scene.dialogue.map((d, j) => (
+                                                <li key={j}><strong>{d.character}:</strong> {d.line}</li>
+                                              ))}
+                                            </ul>
+                                          </div>
+                                        )}
+                                      </div>
+                                    </details>
+                                  ))}
+                                </div>
+                              </div>
                             </div>
                           )}
                         </div>
