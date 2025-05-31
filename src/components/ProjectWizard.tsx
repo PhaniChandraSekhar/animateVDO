@@ -1,13 +1,43 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Wand2, BookOpen, Mic, Video, CheckCircle2, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useNavigate } from 'react-router-dom';
+import { canCreateStory, getUserPlan, PRICING_PLANS } from '../lib/stripe';
 
 export default function ProjectWizard() {
   const [topic, setTopic] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [userPlan, setUserPlan] = useState<string>('hobby');
+  const [monthlyCount, setMonthlyCount] = useState(0);
+  const [canCreate, setCanCreate] = useState({ allowed: true, reason: '' });
   const navigate = useNavigate();
+
+  useEffect(() => {
+    checkUserQuota();
+  }, []);
+
+  const checkUserQuota = async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    // Get user data including plan and monthly count
+    const { data: userData } = await supabase
+      .from('users')
+      .select('subscription_plan, monthly_story_count')
+      .eq('id', user.id)
+      .single();
+
+    if (userData) {
+      const plan = userData.subscription_plan || 'hobby';
+      setUserPlan(plan);
+      setMonthlyCount(userData.monthly_story_count || 0);
+      
+      // Check if user can create more stories
+      const canCreateResult = canCreateStory(plan as any, userData.monthly_story_count || 0);
+      setCanCreate(canCreateResult);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -17,6 +47,26 @@ export default function ProjectWizard() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
+
+      // Check quota again before creating
+      const { data: userData } = await supabase
+        .from('users')
+        .select('subscription_plan, monthly_story_count')
+        .eq('id', user.id)
+        .single();
+
+      if (userData) {
+        const canCreateResult = canCreateStory(
+          userData.subscription_plan as any,
+          userData.monthly_story_count || 0
+        );
+        
+        if (!canCreateResult.allowed) {
+          setError(canCreateResult.reason || 'Cannot create more stories');
+          setLoading(false);
+          return;
+        }
+      }
 
       // Create project
       const { data: project, error: projectError } = await supabase
@@ -48,6 +98,10 @@ export default function ProjectWizard() {
         ]);
       
       if (progressError) throw progressError;
+      
+      // Increment user's monthly story count
+      await supabase.rpc('increment_story_count', { user_id_param: user.id });
+      
       navigate(`/projects/${project.id}`);
     } catch (error) {
       setError(error.message || 'Failed to create project');
@@ -108,12 +162,26 @@ export default function ProjectWizard() {
             </div>
           </div>
 
+          {/* Usage Info */}
+          {userPlan === 'hobby' && (
+            <div className="bg-blue-50 rounded-lg p-4">
+              <p className="text-sm text-blue-700">
+                You're on the {PRICING_PLANS.hobby.name} plan: {monthlyCount}/{PRICING_PLANS.hobby.limits.stories_per_month} stories this month
+              </p>
+              {monthlyCount >= PRICING_PLANS.hobby.limits.stories_per_month - 1 && (
+                <p className="text-sm text-blue-700 mt-1">
+                  <a href="#pricing" className="underline font-medium">Upgrade to Pro</a> for unlimited stories!
+                </p>
+              )}
+            </div>
+          )}
+
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !canCreate.allowed}
             className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-base font-semibold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 transition-colors duration-200"
           >
-            {loading ? 'Creating...' : 'Start Creating'}
+            {loading ? 'Creating...' : !canCreate.allowed ? 'Upgrade to Continue' : 'Start Creating'}
           </button>
         </form>
       </div>

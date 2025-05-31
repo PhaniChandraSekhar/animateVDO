@@ -10,6 +10,8 @@ import Features from './components/Features';
 import Pricing from './components/Pricing';
 import About from './components/About';
 import DashboardPage from './pages/DashboardPage';
+import ProjectDetailPage from './pages/ProjectDetailPage';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { supabase } from './lib/supabase';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -36,9 +38,10 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 
 function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route path="/" element={
+    <ErrorBoundary>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={
           <div className="min-h-screen bg-white">
             <Header />
             <main className="pt-16">
@@ -82,8 +85,17 @@ function App() {
             </PrivateRoute>
           }
         />
+        <Route
+          path="/projects/:id"
+          element={
+            <PrivateRoute>
+              <ProjectDetailPage />
+            </PrivateRoute>
+          }
+        />
       </Routes>
     </BrowserRouter>
+    </ErrorBoundary>
   );
 }
 
