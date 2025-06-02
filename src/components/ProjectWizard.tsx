@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Wand2, BookOpen, Mic, Video, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Wand2, BookOpen, Mic, Video, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useNavigate } from 'react-router-dom';
 import { canCreateStory, getUserPlan, PRICING_PLANS } from '../lib/stripe';
@@ -11,6 +11,7 @@ export default function ProjectWizard() {
   const [userPlan, setUserPlan] = useState<string>('hobby');
   const [monthlyCount, setMonthlyCount] = useState(0);
   const [canCreate, setCanCreate] = useState({ allowed: true, reason: '' });
+  const [creatingStage, setCreatingStage] = useState('');
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -45,17 +46,29 @@ export default function ProjectWizard() {
     setError('');
 
     try {
+      console.log('Starting project creation...');
+      setCreatingStage('Authenticating user...');
+      
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) throw new Error('Not authenticated');
+      
+      console.log('User authenticated:', user.id);
+      setCreatingStage('Checking quota...');
 
       // Check quota again before creating
-      const { data: userData } = await supabase
+      const { data: userData, error: userError } = await supabase
         .from('users')
         .select('subscription_plan, monthly_story_count')
         .eq('id', user.id)
         .single();
+      
+      if (userError) {
+        console.error('Error fetching user data:', userError);
+        throw userError;
+      }
 
       if (userData) {
+        console.log('User data:', userData);
         const canCreateResult = canCreateStory(
           userData.subscription_plan as any,
           userData.monthly_story_count || 0
@@ -69,6 +82,8 @@ export default function ProjectWizard() {
       }
 
       // Create project
+      console.log('Creating project with topic:', topic);
+      setCreatingStage('Creating project...');
       const { data: project, error: projectError } = await supabase
         .from('projects')
         .insert([
@@ -81,9 +96,16 @@ export default function ProjectWizard() {
         .select()
         .single();
       
-      if (projectError) throw projectError;
+      if (projectError) {
+        console.error('Project creation error:', projectError);
+        throw projectError;
+      }
+      
+      console.log('Project created successfully:', project);
       
       // Create story progress
+      console.log('Creating story progress for project:', project.id);
+      setCreatingStage('Setting up story pipeline...');
       const { error: progressError } = await supabase
         .from('story_progress')
         .insert([
@@ -97,13 +119,31 @@ export default function ProjectWizard() {
           }
         ]);
       
-      if (progressError) throw progressError;
+      if (progressError) {
+        console.error('Story progress creation error:', progressError);
+        throw progressError;
+      }
+      
+      console.log('Story progress created successfully');
       
       // Increment user's monthly story count
-      await supabase.rpc('increment_story_count', { user_id_param: user.id });
+      console.log('Incrementing user story count...');
+      const { error: rpcError } = await supabase.rpc('increment_story_count', { user_id_param: user.id });
       
-      navigate(`/projects/${project.id}`);
-    } catch (error) {
+      if (rpcError) {
+        console.error('RPC error (increment_story_count):', rpcError);
+        // Don't throw here, just log the error as this is not critical
+      }
+      
+      console.log('Navigating to project:', `/projects/${project.id}`);
+      setCreatingStage('Redirecting to project...');
+      
+      // Add a small delay to show the redirect message
+      setTimeout(() => {
+        navigate(`/projects/${project.id}`);
+      }, 500);
+    } catch (error: any) {
+      console.error('Project creation failed:', error);
       setError(error.message || 'Failed to create project');
     } finally {
       setLoading(false);
@@ -181,7 +221,12 @@ export default function ProjectWizard() {
             disabled={loading || !canCreate.allowed}
             className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-base font-semibold text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 transition-colors duration-200"
           >
-            {loading ? 'Creating...' : !canCreate.allowed ? 'Upgrade to Continue' : 'Start Creating'}
+            {loading ? (
+              <span className="flex items-center">
+                <Loader2 className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" />
+                {creatingStage || 'Creating...'}
+              </span>
+            ) : !canCreate.allowed ? 'Upgrade to Continue' : 'Start Creating'}
           </button>
         </form>
       </div>
