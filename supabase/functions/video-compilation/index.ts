@@ -33,10 +33,12 @@ interface SceneAssets {
 class VideoCompilationService {
   private supabaseClient: SupabaseClient;
   private ffmpegPath: string;
+  private tempDir: string;
 
   constructor(supabaseClient: SupabaseClient) {
     this.supabaseClient = supabaseClient;
-    this.ffmpegPath = Deno.env.get('FFMPEG_PATH') || '/usr/bin/ffmpeg';
+    this.ffmpegPath = Deno.env.get('FFMPEG_PATH') || 'ffmpeg';
+    this.tempDir = '/tmp/video-compilation';
   }
 
   async compileVideo(
@@ -47,9 +49,13 @@ class VideoCompilationService {
   ): Promise<VideoCompilationData> {
     console.log('Starting video compilation for project:', projectId);
 
+    // Create temporary directory for processing
+    const workDir = `${this.tempDir}/${projectId}`;
+    await this.ensureDirectory(workDir);
+
     // Prepare scene assets
     const sceneAssets = this.prepareSceneAssets(scriptData, characterData, audioData);
-    
+
     // Define render settings
     const renderSettings: RenderSettings = {
       resolution: '1920x1080',
@@ -61,33 +67,35 @@ class VideoCompilationService {
       watermark: true
     };
 
-    // In a real implementation, this would:
-    // 1. Download all assets locally
-    // 2. Use FFmpeg to create video for each scene
-    // 3. Add Ken Burns effect to images
-    // 4. Sync audio with visuals
-    // 5. Add transitions between scenes
-    // 6. Add intro/outro
-    // 7. Export final video
-
-    // For now, we'll create a mock implementation
-    const videoFileName = `${projectId}/final_video.mp4`;
-    const thumbnailFileName = `${projectId}/thumbnail.jpg`;
-    
-    // Mock video compilation process
     console.log('Processing scenes:', sceneAssets.length);
-    console.log('Applying transitions:', renderSettings.transitions);
-    console.log('Target resolution:', renderSettings.resolution);
-    
+
+    // Download all assets locally
+    const downloadedAssets = await this.downloadAllAssets(sceneAssets, workDir);
+
+    // Create video for each scene with Ken Burns effect
+    const sceneVideos = await this.createSceneVideos(downloadedAssets, workDir, renderSettings);
+
+    // Concatenate scenes with transitions
+    const finalVideoPath = await this.concatenateScenes(sceneVideos, workDir, renderSettings);
+
     // Calculate total duration
     const totalDuration = sceneAssets.reduce((sum, scene) => sum + scene.duration, 0);
     const minutes = Math.floor(totalDuration / 60);
     const seconds = Math.round(totalDuration % 60);
     const formattedDuration = `${minutes}:${seconds.toString().padStart(2, '0')}`;
 
-    // In production, this would upload the actual compiled video
-    const videoUrl = await this.mockUploadVideo(videoFileName);
-    const thumbnailUrl = await this.mockUploadThumbnail(thumbnailFileName, characterData);
+    // Generate thumbnail from first frame
+    const thumbnailPath = await this.generateThumbnail(finalVideoPath, workDir);
+
+    // Upload video and thumbnail to Supabase Storage
+    const videoUrl = await this.uploadVideoToStorage(finalVideoPath, projectId);
+    const thumbnailUrl = await this.uploadThumbnailToStorage(thumbnailPath, projectId);
+
+    // Get file size
+    const fileSize = await this.getFileSize(finalVideoPath);
+
+    // Cleanup temporary files
+    await this.cleanup(workDir);
 
     return {
       video_url: videoUrl,
@@ -95,7 +103,7 @@ class VideoCompilationService {
       duration: formattedDuration,
       resolution: renderSettings.resolution,
       format: 'mp4',
-      file_size: 50 * 1024 * 1024, // Mock 50MB file
+      file_size: fileSize,
       render_settings: renderSettings,
       timestamp: new Date().toISOString()
     };
@@ -139,68 +147,226 @@ class VideoCompilationService {
     return `https://via.placeholder.com/1920x1080/4F46E5/FFFFFF?text=Scene+${scene.scene_number}`;
   }
 
-  private async mockUploadVideo(fileName: string): Promise<string> {
-    // In production, this would upload the actual video file
-    // For now, return a mock URL
-    return `https://storage.example.com/${fileName}`;
+  private async ensureDirectory(path: string): Promise<void> {
+    try {
+      await Deno.mkdir(path, { recursive: true });
+    } catch (error) {
+      // Directory might already exist
+      console.log('Directory creation:', error);
+    }
   }
 
-  private async mockUploadThumbnail(
-    fileName: string, 
-    characterData: any
-  ): Promise<string> {
-    // Use the first scene visual as thumbnail, or a default
-    if (characterData.scenes && characterData.scenes.length > 0) {
-      return characterData.scenes[0].image_url;
+  private async downloadFile(url: string, destination: string): Promise<void> {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to download ${url}: ${response.statusText}`);
+      }
+      const blob = await response.blob();
+      const buffer = await blob.arrayBuffer();
+      await Deno.writeFile(destination, new Uint8Array(buffer));
+      console.log(`Downloaded: ${destination}`);
+    } catch (error) {
+      console.error(`Error downloading ${url}:`, error);
+      throw error;
     }
-    return `https://via.placeholder.com/1920x1080/4F46E5/FFFFFF?text=Video+Thumbnail`;
+  }
+
+  private async downloadAllAssets(
+    scenes: SceneAssets[],
+    workDir: string
+  ): Promise<Array<{ scene_number: number; imagePath: string; audioPath: string; duration: number }>> {
+    const downloaded = [];
+
+    for (const scene of scenes) {
+      const imagePath = `${workDir}/scene_${scene.scene_number}_image.jpg`;
+      const audioPath = `${workDir}/scene_${scene.scene_number}_audio.mp3`;
+
+      try {
+        // Download image
+        await this.downloadFile(scene.visual_url, imagePath);
+
+        // Download audio
+        await this.downloadFile(scene.audio_url, audioPath);
+
+        downloaded.push({
+          scene_number: scene.scene_number,
+          imagePath,
+          audioPath,
+          duration: scene.duration
+        });
+      } catch (error) {
+        console.error(`Failed to download assets for scene ${scene.scene_number}:`, error);
+        throw new Error(`Asset download failed for scene ${scene.scene_number}`);
+      }
+    }
+
+    return downloaded;
+  }
+
+  private async createSceneVideos(
+    assets: Array<{ scene_number: number; imagePath: string; audioPath: string; duration: number }>,
+    workDir: string,
+    settings: RenderSettings
+  ): Promise<string[]> {
+    const sceneVideos: string[] = [];
+
+    for (const asset of assets) {
+      const outputPath = `${workDir}/scene_${asset.scene_number}.mp4`;
+
+      // Create Ken Burns effect: zoom in from 1.0 to 1.2 over the duration
+      const zoomDuration = asset.duration * settings.fps; // Convert to frames
+
+      const args = [
+        '-loop', '1',
+        '-i', asset.imagePath,
+        '-i', asset.audioPath,
+        '-filter_complex',
+        `[0:v]scale=${settings.resolution},zoompan=z='min(zoom+0.0015,1.2)':d=${zoomDuration}:s=${settings.resolution}:fps=${settings.fps}[v]`,
+        '-map', '[v]',
+        '-map', '1:a',
+        '-c:v', 'libx264',
+        '-preset', 'medium',
+        '-crf', '23',
+        '-c:a', 'aac',
+        '-b:a', '192k',
+        '-shortest',
+        '-y',
+        outputPath
+      ];
+
+      await this.executeFFmpegCommand(args);
+      sceneVideos.push(outputPath);
+    }
+
+    return sceneVideos;
+  }
+
+  private async concatenateScenes(
+    sceneVideos: string[],
+    workDir: string,
+    settings: RenderSettings
+  ): Promise<string> {
+    const concatListPath = `${workDir}/concat_list.txt`;
+    const outputPath = `${workDir}/final_video.mp4`;
+
+    // Create concat demuxer file list
+    const fileList = sceneVideos.map(path => `file '${path}'`).join('\n');
+    await Deno.writeTextFile(concatListPath, fileList);
+
+    // Concatenate with fade transitions
+    const args = [
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatListPath,
+      '-c:v', 'libx264',
+      '-preset', 'medium',
+      '-crf', '23',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-y',
+      outputPath
+    ];
+
+    await this.executeFFmpegCommand(args);
+    return outputPath;
+  }
+
+  private async generateThumbnail(videoPath: string, workDir: string): Promise<string> {
+    const thumbnailPath = `${workDir}/thumbnail.jpg`;
+
+    const args = [
+      '-i', videoPath,
+      '-ss', '00:00:01',
+      '-vframes', '1',
+      '-vf', 'scale=1920:1080',
+      '-y',
+      thumbnailPath
+    ];
+
+    await this.executeFFmpegCommand(args);
+    return thumbnailPath;
+  }
+
+  private async uploadVideoToStorage(filePath: string, projectId: string): Promise<string> {
+    const fileName = `${projectId}/videos/final_video.mp4`;
+    const fileData = await Deno.readFile(filePath);
+
+    const { data, error } = await this.supabaseClient.storage
+      .from('project-assets')
+      .upload(fileName, fileData, {
+        contentType: 'video/mp4',
+        upsert: true
+      });
+
+    if (error) {
+      console.error('Error uploading video:', error);
+      throw new Error(`Failed to upload video: ${error.message}`);
+    }
+
+    const { data: { publicUrl } } = this.supabaseClient.storage
+      .from('project-assets')
+      .getPublicUrl(fileName);
+
+    return publicUrl;
+  }
+
+  private async uploadThumbnailToStorage(filePath: string, projectId: string): Promise<string> {
+    const fileName = `${projectId}/videos/thumbnail.jpg`;
+    const fileData = await Deno.readFile(filePath);
+
+    const { data, error } = await this.supabaseClient.storage
+      .from('project-assets')
+      .upload(fileName, fileData, {
+        contentType: 'image/jpeg',
+        upsert: true
+      });
+
+    if (error) {
+      console.error('Error uploading thumbnail:', error);
+      throw new Error(`Failed to upload thumbnail: ${error.message}`);
+    }
+
+    const { data: { publicUrl } } = this.supabaseClient.storage
+      .from('project-assets')
+      .getPublicUrl(fileName);
+
+    return publicUrl;
+  }
+
+  private async getFileSize(filePath: string): Promise<number> {
+    const fileInfo = await Deno.stat(filePath);
+    return fileInfo.size;
+  }
+
+  private async cleanup(workDir: string): Promise<void> {
+    try {
+      await Deno.remove(workDir, { recursive: true });
+      console.log('Cleaned up temporary files');
+    } catch (error) {
+      console.error('Error cleaning up:', error);
+    }
   }
 
   private async executeFFmpegCommand(args: string[]): Promise<void> {
-    // In production, this would execute actual FFmpeg commands
-    console.log('FFmpeg command:', this.ffmpegPath, args.join(' '));
-    
-    // Example FFmpeg command structure:
-    // ffmpeg -i image1.jpg -i audio1.mp3 -filter_complex 
-    // "[0:v]scale=1920:1080,zoompan=z='zoom+0.001':d=750:s=1920x1080[v1]" 
-    // -map "[v1]" -map 1:a -c:v libx264 -c:a aac -shortest scene1.mp4
-  }
+    console.log('Executing FFmpeg:', this.ffmpegPath, args.join(' '));
 
-  createFFmpegScript(scenes: SceneAssets[]): string {
-    // Generate FFmpeg filter complex for all scenes
-    const filterComplex: string[] = [];
-    const inputs: string[] = [];
-    
-    scenes.forEach((scene, index) => {
-      inputs.push(`-i "${scene.visual_url}"`);
-      inputs.push(`-i "${scene.audio_url}"`);
-      
-      // Ken Burns effect for images
-      filterComplex.push(
-        `[${index * 2}:v]scale=1920:1080,` +
-        `zoompan=z='if(lte(zoom,1.0),1.5,max(1.001,zoom-0.0015))':` +
-        `d=${scene.duration * 30}:s=1920x1080:fps=30[v${index}]`
-      );
+    const command = new Deno.Command(this.ffmpegPath, {
+      args,
+      stdout: 'piped',
+      stderr: 'piped',
     });
-    
-    // Concatenate all video streams with transitions
-    const concatFilter = scenes.map((_, i) => `[v${i}]`).join('') + 
-      `concat=n=${scenes.length}:v=1:a=0[outv]`;
-    
-    filterComplex.push(concatFilter);
-    
-    // Concatenate all audio streams
-    const audioConcat = scenes.map((_, i) => `[${i * 2 + 1}:a]`).join('') + 
-      `concat=n=${scenes.length}:v=0:a=1[outa]`;
-    
-    filterComplex.push(audioConcat);
-    
-    return `ffmpeg ${inputs.join(' ')} ` +
-      `-filter_complex "${filterComplex.join(';')}" ` +
-      `-map "[outv]" -map "[outa]" ` +
-      `-c:v libx264 -preset slow -crf 22 ` +
-      `-c:a aac -b:a 192k ` +
-      `-pix_fmt yuv420p output.mp4`;
+
+    const { code, stdout, stderr } = await command.output();
+
+    if (code !== 0) {
+      const errorMessage = new TextDecoder().decode(stderr);
+      console.error('FFmpeg error:', errorMessage);
+      throw new Error(`FFmpeg failed with code ${code}: ${errorMessage}`);
+    }
+
+    const output = new TextDecoder().decode(stdout);
+    console.log('FFmpeg output:', output);
   }
 }
 
@@ -260,18 +426,20 @@ export async function handleRequest(req: Request, supabaseClient: SupabaseClient
 
     // Initialize video compilation service
     const videoService = new VideoCompilationService(supabaseClient);
-    
-    // Check if we should use mock data
-    const useMockData = Deno.env.get('USE_MOCK_VIDEO') === 'true';
-    
+
+    // Check if we should use mock data (only if explicitly enabled)
+    const useMockData = Deno.env.get('USE_MOCK_VIDEO') === 'true' ||
+                        Deno.env.get('DISABLE_VIDEO_PROCESSING') === 'true';
+
     let videoData: VideoCompilationData;
-    
-    if (useMockData || Deno.env.get('DISABLE_VIDEO_PROCESSING') === 'true') {
+
+    if (useMockData) {
+      console.log('Using mock video data (USE_MOCK_VIDEO or DISABLE_VIDEO_PROCESSING is enabled)');
       // Create mock video data
       const totalDuration = audioStage.data.content.total_duration;
       videoData = {
         video_url: `https://storage.example.com/${project_id}/final_video.mp4`,
-        thumbnail_url: characterStage.data?.content?.scenes?.[0]?.image_url || 
+        thumbnail_url: characterStage.data?.content?.scenes?.[0]?.image_url ||
           'https://via.placeholder.com/1920x1080/4F46E5/FFFFFF?text=Video+Thumbnail',
         duration: totalDuration,
         resolution: '1920x1080',
@@ -288,13 +456,27 @@ export async function handleRequest(req: Request, supabaseClient: SupabaseClient
         timestamp: new Date().toISOString()
       };
     } else {
-      // Compile actual video
-      videoData = await videoService.compileVideo(
-        project_id,
-        scriptStage.data.content,
-        characterStage.data?.content || {},
-        audioStage.data.content
-      );
+      console.log('Compiling actual video with FFmpeg');
+      // Compile actual video using FFmpeg
+      try {
+        videoData = await videoService.compileVideo(
+          project_id,
+          scriptStage.data.content,
+          characterStage.data?.content || {},
+          audioStage.data.content
+        );
+      } catch (error: any) {
+        console.error('Video compilation failed:', error);
+
+        // Check if FFmpeg is not available
+        if (error.message.includes('command not found') || error.message.includes('No such file')) {
+          throw new Error(
+            'FFmpeg is not installed. Please install FFmpeg in your Supabase Edge Functions environment or set USE_MOCK_VIDEO=true for testing.'
+          );
+        }
+
+        throw error;
+      }
     }
 
     // Store video data
